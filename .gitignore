@@ -1,0 +1,10 @@
+# Environment files
+.env
+env
+*.env
+
+# Cache & system files
+.agent-cache/
+node_modules/
+.DS_Store
+Thumbs.db
