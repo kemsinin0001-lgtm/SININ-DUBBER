@@ -1,0 +1,764 @@
+ខ្ញុំបានពិនិត្យកូដរួចហើយ។ បញ្ហាធំៗដែលរកឃើញ និងបានកែ៖
+
+**បញ្ហាដែលរកឃើញ**
+1. **Lucide icons បាត់ពេល re-render** — `lucide.createIcons()` ដំណើរការតែម្តងក្រោយ 300ms ប៉ុណ្ណោះ ដូច្នេះ icons ក្នុង
+Modal, ប៊ូតុង Play/Pause, និង log ថ្មីៗ មិនបង្ហាញទេ ហើយអាចធ្វើឱ្យ React crash ("removeChild" error)។ → បានបង្កើត `Icon`
+component ដែលដំណើរការត្រឹមត្រូវជាមួយ React។
+2. **ប៊ូតុងភាគច្រើនមិនមានមុខងារ** — Load Video, Import SRT, Download SRT, Export, Skip, Demucs... គ្មាន onClick ទេ។ →
+បានដាក់មុខងារពិតទាំងអស់។
+3. **Load Video ឥឡូវផ្ទុកវីដេអូពិត** ពីកុំព្យូទ័រ ហើយ player លេង/ឈប់/seek បានពិតប្រាកដ (មិនមែន simulation ទៀតទេ)។
+4. **Import / Download SRT ពិតប្រាកដ** — parse ឯកសារ .srt ចូលតារាង និង export ចេញជាឯកសារ .srt វិញ។
+5. **Subtitle sync ពិត** — អត្ថបទខ្មែរបង្ហាញលើវីដេអូតាម timing ហើយជួរក្នុងតារាង highlight ដោយស្វ័យប្រវត្តិពេលលេង។
+6. **ចុចជួរ segment / ចុច Timeline → seek ទៅពេលវេលានោះ**, កែ Timing បានផ្ទាល់, បន្ថែម/លុប segment បាន។
+7. **កំហុសតូចៗ** — `pitchShift`/`bgmVolume` ក្លាយជា string (កែជា Number), BGM volume ឥឡូវគ្រប់គ្រងសំឡេងវីដេអូពិត, API
+key រក្សាទុកក្នុង localStorage, `user-select:none` រារាំងការ select អត្ថបទក្នុង input (បានកែ), Spacebar = Play/Pause។
+
+**កូដពេញលេញដែលបានកែរួច៖**
+
+```html
+<!DOCTYPE html>
+<html lang="km">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SININ DUBBER PRO - AI Video Dubbing & Translation Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Kantumruy+Pro:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', 'Kantumruy Pro', sans-serif;
+            background-color: #090a0f;
+            color: #f1f5f9;
+            user-select: none;
+        }
+
+        input,
+        textarea,
+        select {
+            user-select: text;
+        }
+
+        .font-code {
+            font-family: 'Fira Code', monospace;
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #11131f;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #2a2d42;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #414666;
+        }
+
+        .glow-cyan {
+            box-shadow: 0 0 20px rgba(6, 182, 212, 0.2);
+        }
+
+        .glow-purple {
+            box-shadow: 0 0 20px rgba(147, 51, 234, 0.25);
+        }
+
+        .gradient-brand {
+            background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 50%, #8b5cf6 100%);
+        }
+    </style>
+</head>
+
+<body class="h-screen overflow-hidden flex flex-col bg-[#090a0f]">
+    <div id="root" class="h-full w-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        /* ---------- Icon component (ដំណើរការត្រឹមត្រូវជាមួយ React re-render) ---------- */
+        function Icon({ name, className = "" }) {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (ref.current && window.lucide) {
+                    ref.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+                    window.lucide.createIcons();
+                }
+            }, [name, className]);
+            return <span ref={ref} className="inline-flex items-center justify-center"></span>;
+        }
+
+        /* ---------- Time helpers ---------- */
+        const pad = (n, l = 2) => String(n).padStart(l, '0');
+        const timeToSec = (t) => {
+            const m = String(t).match(/(\d+):(\d+):(\d+)[.,](\d+)/);
+            if (!m) return 0;
+            return (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;
+        };
+        const secToTime = (s, sep = '.') => {
+            s = Math.max(0, s);
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = Math.floor(s % 60), ms = Math.round((s % 1) * 1000);
+            return `${pad(h)}:${pad(m)}:${pad(sc)}${sep}${pad(ms, 3)}`;
+        };
+        const formatClock = (secs) => `${pad(Math.floor(secs / 60))}:${pad(Math.floor(secs % 60))}`;
+
+        /* ---------- SRT parser ---------- */
+        function parseSRT(text) {
+            const blocks = text.replace(/\r/g, '').split(/\n\s*\n/);
+            const segs = [];
+            blocks.forEach(block => {
+                const lines = block.trim().split('\n');
+                if (lines.length < 2) return;
+                let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
+                const tm = lines[idx] && lines[idx].match(/(\d+:\d+:\d+[.,]\d+)\s*-->\s * (\d +: \d +: \d + [.,]\d +) /);
+            if (tm) {
+                segs.push({
+                    id: segs.length + 1,
+                    start: tm[1].replace(',', '.'),
+                    end: tm[2].replace(',', '.'),
+                    text: lines.slice(idx + 1).join(' '),
+                    speaker: 'Male', gender: 'Male', lang: 'KM', status: 'Ready'
+                });
+            }
+        });
+        return segs;
+}
+
+        const INITIAL_SEGMENTS = [
+            { id: 21, start: "00:01:02.780", end: "00:01:04.620", text: "នៅពេលដែលលោកអ្នកបានចូលមកកាន់ទីនេះ...", speaker: "Boy", gender: "Boy", lang: "KM", status: "Ready" },
+            { id: 22, start: "00:01:05.020", end: "00:01:06.860", text: "ពីមុននាងគ្រាន់តែជាក្មេងស្រីម្នាក់នៅក្នុងវត្តប៉ុណ្ណោះ។", speaker: "Boy", gender: "Boy", lang: "KM", status: "Ready" },
+            { id: 23, start: "00:01:07.100", end: "00:01:07.980", text: "មើលសមណៈនេះ។", speaker: "Boy", gender: "Boy", lang: "KM", status: "Synced" },
+            { id: 24, start: "00:01:08.220", end: "00:01:10.540", text: "នាងបង្វែរមុខទៅផ្លូវផ្ទះលោកស្រី យ៉ាងម៉េច?", speaker: "Boy", gender: "Boy", lang: "KM", status: "Synced" },
+            { id: 25, start: "00:01:10.540", end: "00:01:13.345", text: "ព្រោះជាយ៉ាងណាក៏ដោយ ក៏គាត់នៅតែជាមេបញ្ជាការរបស់យើងដែរ។", speaker: "Boy", gender: "Boy", lang: "KM", status: "Synced" },
+            { id: 26, start: "00:01:17.745", end: "00:01:18.865", text: "ទីនេះពិតជារំភើបណាស់?", speaker: "Female", gender: "Female", lang: "KM", status: "Synced" },
+            { id: 27, start: "00:01:19.425", end: "00:01:20.945", text: "ខ្ញុំខ្មាសគេនៅក្នុងហ្វូងមនុស្សណាស់", speaker: "Female", gender: "Female", lang: "KM", status: "Synced" },
+            { id: 28, start: "00:01:22.785", end: "00:01:23.905", text: "ម៉េចក៏ដឹងខ្លួនហើយ?", speaker: "Girl", gender: "Girl", lang: "KM", status: "Synced" },
+            { id: 29, start: "00:01:31.780", end: "00:01:33.460", text: "ខ្ញុំបានឆ្លងមកដល់ទីនេះ។", speaker: "Female", gender: "Female", lang: "KM", status: "Synced" },
+            { id: 30, start: "00:01:36.260", end: "00:01:37.300", text: "បើម៉េចនៅទីនេះទៅ!", speaker: "Boy", gender: "Boy", lang: "KM", status: "Synced" },
+            { id: 31, start: "00:01:37.395", end: "00:01:39.395", text: "លោកអើយ នេះជាចិត្តស្រឡាញ់ណាស់។", speaker: "Boy", gender: "Boy", lang: "KM", status: "Synced" }
+        ];
+
+        function SininDubberApp() {
+            const [segments, setSegments] = useState(INITIAL_SEGMENTS);
+            const [activeSegmentId, setActiveSegmentId] = useState(21);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [currentTime, setCurrentTime] = useState(62.78);
+            const [duration, setDuration] = useState(289);
+            const [isBusy, setIsBusy] = useState(false);
+            const [rvcReady, setRvcReady] = useState(true);
+            const [showApiModal, setShowApiModal] = useState(false);
+            const [apiKey, setApiKey] = useState(localStorage.getItem('sinin_api_key') || "");
+            const [watermarkLogo, setWatermarkLogo] = useState(true);
+            const [pitchShift, setPitchShift] = useState(0);
+            const [bgmVolume, setBgmVolume] = useState(70);
+            const [searchQuery, setSearchQuery] = useState("");
+            const [videoURL, setVideoURL] = useState(null);
+            const [videoName, setVideoName] = useState("_part01.mp4");
+            const [logs, setLogs] = useState([
+                { time: "00:00:00", text: "🚀 SININ DUBBER PRO v1.2.0 Engine Initialized.", type: "system" },
+                { time: "00:00:00", text: "RVC Neural Voice Conversion Engine: READY", type: "success" }
+            ]);
+
+            const logsEndRef = useRef(null);
+            const videoRef = useRef(null);
+            const videoInputRef = useRef(null);
+            const srtInputRef = useRef(null);
+            const timelineRef = useRef(null);
+
+            useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
+
+            const addLog = (text, type = "info") => {
+                const now = new Date();
+                const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+                setLogs(prev => [...prev, { time: timeStr, text, type }]);
+            };
+
+            /* ---------- Simulation clock (ប្រើតែពេលមិនទាន់មានវីដេអូពិត) ---------- */
+            useEffect(() => {
+                if (!isPlaying || videoURL) return;
+                const interval = setInterval(() => {
+                    setCurrentTime(prev => {
+                        if (prev >= duration) { setIsPlaying(false); return 0; }
+                        return prev + 0.1;
+                    });
+                }, 100);
+                return () => clearInterval(interval);
+            }, [isPlaying, duration, videoURL]);
+
+            /* ---------- BGM volume → video volume ---------- */
+            useEffect(() => {
+                if (videoRef.current) videoRef.current.volume = bgmVolume / 100;
+            }, [bgmVolume, videoURL]);
+
+            /* ---------- Active subtitle ពី currentTime ---------- */
+            const currentSub = segments.find(s => currentTime >= timeToSec(s.start) && currentTime <= timeToSec(s.end));
+            useEffect(() => {
+                if (isPlaying && currentSub && currentSub.id !== activeSegmentId) setActiveSegmentId(currentSub.id);
+            }, [currentTime]);
+
+            /* ---------- Play / Pause / Seek ---------- */
+            const togglePlay = () => {
+                if (videoURL && videoRef.current) {
+                    isPlaying ? videoRef.current.pause() : videoRef.current.play();
+                } else {
+                    setIsPlaying(p => !p);
+                }
+            };
+            const seekTo = (t) => {
+                const v = Math.max(0, Math.min(duration, t));
+                setCurrentTime(v);
+                if (videoURL && videoRef.current) videoRef.current.currentTime = v;
+            };
+            const jumpSegment = (dir) => {
+                const sorted = [...segments].sort((a, b) => timeToSec(a.start) - timeToSec(b.start));
+                const target = dir > 0
+                    ? sorted.find(s => timeToSec(s.start) > currentTime + 0.2)
+                    : [...sorted].reverse().find(s => timeToSec(s.start) < currentTime - 0.2);
+                if (target) { setActiveSegmentId(target.id); seekTo(timeToSec(target.start)); }
+            };
+
+            /* ---------- Spacebar = Play/Pause ---------- */
+            useEffect(() => {
+                const onKey = (e) => {
+                    const tag = (e.target.tagName || '').toLowerCase();
+                    if (e.code === 'Space' && !['input', 'textarea', 'select'].includes(tag)) {
+                        e.preventDefault(); togglePlay();
+                    }
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [isPlaying, videoURL]);
+
+            /* ---------- Load Video (ពិត) ---------- */
+            const handleVideoFile = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                if (videoURL) URL.revokeObjectURL(videoURL);
+                setVideoURL(URL.createObjectURL(file));
+                setVideoName(file.name);
+                setIsPlaying(false);
+                setCurrentTime(0);
+                addLog(`✓ បានផ្ទុកវីដេអូ: ${file.name} (${(file.size / 1048576).toFixed(1)} MB)`, "success");
+                e.target.value = '';
+            };
+
+            /* ---------- Import SRT (ពិត) ---------- */
+            const handleSrtFile = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const parsed = parseSRT(reader.result);
+                    if (parsed.length === 0) { addLog("⚠ មិនអាចអាន SRT បានទេ — ពិនិត្យទម្រង់ឯកសារ", "warning"); return; }
+                    setSegments(parsed);
+                    setActiveSegmentId(parsed[0].id);
+                    addLog(`✓ បាននាំចូល ${parsed.length} segments ពី ${file.name}`, "success");
+                };
+                reader.readAsText(file, 'utf-8');
+                e.target.value = '';
+            };
+
+            /* ---------- Download SRT (ពិត) ---------- */
+            const downloadSRT = () => {
+                const content = segments.map((s, i) =>
+                    `${i + 1}\n${s.start.replace('.', ',')} --> ${s.end.replace('.', ',')}\n${s.text}\n`
+                ).join('\n');
+                const blob = new Blob(["\uFEFF" + content], { type: 'text/plain;charset=utf-8' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = videoName.replace(/\.\w+$/, '') + '_khmer.srt';
+                a.click();
+                URL.revokeObjectURL(a.href);
+                addLog(`✓ បានទាញយក SRT (${segments.length} segments)`, "success");
+            };
+
+            /* ---------- Simulated AI pipelines ---------- */
+            const runPipeline = (steps, done) => {
+                if (isBusy) return;
+                setIsBusy(true);
+                steps.forEach(([delay, msg, type]) => setTimeout(() => addLog(msg, type), delay));
+                setTimeout(() => { setIsBusy(false); if (done) done(); }, steps[steps.length - 1][0] + 300);
+            };
+            const handleTranscribe = () => runPipeline([
+                [100, "🎙 កំពុងដកស្រង់សំឡេងពីវីដេអូ (Whisper engine)...", "system"],
+                [1500, "កំពុងបំបែក speakers និង timing...", "info"],
+                [3000, "✓ Transcription រួចរាល់", "success"]
+            ]);
+            const handleTranslate = () => runPipeline([
+                [100, "🌐 ចាប់ផ្តើម Gemini AI Khmer translation pipeline...", "system"],
+                [1200, "កំពុងវិភាគពាក្យគួរសមខ្មែរ និងសម្លេងនិយាយ...", "info"],
+                [2400, "RVC Synthesis: កំពុងបង្កើតសំឡេងប្រុស/ស្រីធម្មជាតិ...", "info"],
+                [3500, "✓ ការបកប្រែ និង voice sync រួចរាល់", "success"]
+            ], () => setSegments(prev => prev.map(s => ({ ...s, status: "Synced" }))));
+            const handleExport = () => runPipeline([
+                [100, "📦 ចាប់ផ្តើម Export: muxing audio + subtitles...", "system"],
+                [1500, "Rendering 25%... (RVC voice tracks)", "info"],
+                [3000, "Rendering 70%... (burning watermark + subs)", "info"],
+                [4500, "✓ Export រួចរាល់ — " + videoName.replace(/\.\w+$/, '') + "_dubbed.mp4", "success"]
+            ], downloadSRT);
+            const handleDemucs = () => runPipeline([
+                [100, "🎵 Demucs: កំពុងបំបែក BGM ចេញពីសំឡេងនិយាយ...", "system"],
+                [2500, "✓ បានបំបែក vocals.wav + bgm.wav", "success"]
+            ]);
+            const handleScanPitch = () => runPipeline([
+                [100, "🔍 កំពុង Scan pitch សម្រាប់ RVC...", "system"],
+                [1500, "✓ Pitch ល្អបំផុត: +2 semitones", "success"]
+            ], () => setPitchShift(2));
+
+            /* ---------- Segment CRUD ---------- */
+            const handleGenderChange = (id, g) => {
+                setSegments(prev => prev.map(s => s.id === id ? { ...s, gender: g, speaker: g } : s));
+                addLog(`Segment #${id} voice → ${g}`, "info");
+            };
+            const handleTextChange = (id, t) => setSegments(prev => prev.map(s => s.id === id ? { ...s, text: t } : s));
+            const handleTimeChange = (id, field, val) => setSegments(prev => prev.map(s => s.id === id ? { ...s, [field]: val } : s));
+            const addSegment = () => {
+                const maxId = Math.max(0, ...segments.map(s => s.id));
+                const last = segments.find(s => s.id === activeSegmentId) || segments[segments.length - 1];
+                const start = last ? timeToSec(last.end) + 0.2 : currentTime;
+                const seg = { id: maxId + 1, start: secToTime(start), end: secToTime(start + 2), text: "អត្ថបទថ្មី...", speaker: "Male", gender: "Male", lang: "KM", status: "Ready" };
+                setSegments(prev => [...prev, seg]);
+                setActiveSegmentId(seg.id);
+                addLog(`➕ បានបន្ថែម Segment #${seg.id}`, "info");
+            };
+            const deleteSegment = () => {
+                if (!segments.length) return;
+                setSegments(prev => prev.filter(s => s.id !== activeSegmentId));
+                addLog(`🗑 បានលុប Segment #${activeSegmentId}`, "warning");
+            };
+
+            const handleTimelineClick = (e) => {
+                const rect = timelineRef.current.getBoundingClientRect();
+                seekTo(((e.clientX - rect.left) / rect.width) * duration);
+            };
+
+            const filteredSegments = segments.filter(s =>
+                s.text.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                s.speaker.toLowerCase().includes(searchQuery.toLowerCase())
+            );
+            const activeSeg = segments.find(s => s.id === activeSegmentId);
+
+            return (
+                <div className="flex flex-col h-full bg-[#090a0f] text-slate-200 select-none overflow-hidden">
+
+                    {/* Hidden file inputs */}
+                    <input ref={videoInputRef} type="file" accept="video/*" className="hidden" onChange={handleVideoFile} />
+                    <input ref={srtInputRef} type="file" accept=".srt,.txt" className="hidden" onChange={handleSrtFile} />
+
+                    {/* Header */}
+                    <header className="h-11 bg-[#10121e] border-b border-slate-800/80 px-4 flex items-center justify-between text-xs">
+                        <div className="flex items-center space-x-3">
+                            <div className="flex space-x-1.5">
+                                <div className="w-3 h-3 rounded-full bg-rose-500/90"></div>
+                                <div className="w-3 h-3 rounded-full bg-amber-500/90"></div>
+                                <div className="w-3 h-3 rounded-full bg-emerald-500/90"></div>
+                            </div>
+                            <div className="h-4 w-[1px] bg-slate-800 mx-1"></div>
+                            <span className="font-black tracking-wider text-transparent bg-clip-text gradient-brand text-sm">SININ DUBBER PRO</span>
+                            <span className="bg-cyan-950 text-cyan-400 border border-cyan-700/50 px-2 py-0.5 rounded text-[10px] font-mono font-semibold">v1.2.0 STUDIO</span>
+                        </div>
+                        <div className="flex items-center space-x-5 text-slate-400 font-mono text-[11px]">
+                            <span className="flex items-center text-slate-300"><Icon name="cpu" className="w-3.5 h-3.5 mr-1.5 text-cyan-400" /> GPU: RTX 4090</span>
+                            <span className="flex items-center text-slate-300"><Icon name="zap" className="w-3.5 h-3.5 mr-1.5 text-amber-400" /> RVC: {rvcReady ? 'Active' : 'Off'}</span>
+                            <span className="flex items-center text-slate-300"><Icon name="sparkles" className="w-3.5 h-3.5 mr-1.5 text-purple-400" /> Gemini 1.5 Pro</span>
+                        </div>
+                    </header>
+
+                    {/* Main toolbar */}
+                    <div className="bg-[#131525] px-3 py-2 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <button onClick={() => videoInputRef.current.click()} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md font-medium transition shadow-md">
+                                <Icon name="folder-open" className="w-3.5 h-3.5" /> Load Video
+                            </button>
+                            <button onClick={handleTranscribe} disabled={isBusy} className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-md font-medium transition shadow-md disabled:opacity-50">
+                                <Icon name="sparkles" className="w-3.5 h-3.5 text-amber-300" /> Transcribe
+                            </button>
+                            <button onClick={handleTranslate} disabled={isBusy} className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md font-medium transition shadow-md disabled:opacity-50">
+                                <Icon name="languages" className="w-3.5 h-3.5" /> Translate Khmer
+                            </button>
+                            <button onClick={() => srtInputRef.current.click()} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-md font-medium transition">
+                                <Icon name="file-text" className="w-3.5 h-3.5 text-blue-400" /> Import SRT
+                            </button>
+                            <button onClick={handleExport} disabled={isBusy} className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md font-medium transition shadow-md glow-purple disabled:opacity-50">
+                                <Icon name="download" className="w-3.5 h-3.5" /> Export Dubbed Video
+                            </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => { setRvcReady(!rvcReady); addLog(`RVC Engine: ${!rvcReady ? 'ENABLED' : 'DISABLED'}`, "system"); }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition border ${rvcReady ? 'bg-emerald-950/80 border-emerald-500/50 text-emerald-400' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                                <Icon name="check-circle-2" className="w-3.5 h-3.5" /> {rvcReady ? 'RVC Model Ready' : 'Enable RVC'}
+                            </button>
+                            <button onClick={() => setShowApiModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 rounded-md font-medium transition">
+                                <Icon name="key" className="w-3.5 h-3.5" /> API Settings
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Quick actions */}
+                    <div className="bg-[#0f101c] px-3 py-1.5 border-b border-slate-800/60 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2 overflow-x-auto">
+                            <button onClick={handleTranslate} disabled={isBusy} className="flex items-center gap-1 px-2.5 py-1 bg-rose-600/80 hover:bg-rose-600 text-white rounded text-[11px] font-medium transition disabled:opacity-50">
+                                <Icon name="globe" className="w-3 h-3" /> Auto Translate SRT
+                            </button>
+                            <button onClick={downloadSRT} className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] border border-slate-700">
+                                <Icon name="download-cloud" className="w-3 h-3 text-cyan-400" /> Download SRT
+                            </button>
+                            <button onClick={handleDemucs} disabled={isBusy} className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] border border-slate-700 disabled:opacity-50">
+                                <Icon name="disc" className="w-3 h-3 text-purple-400" /> Demucs BGM Separator
+                            </button>
+                            <button onClick={handleScanPitch} disabled={isBusy} className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] border border-slate-700 disabled:opacity-50">
+                                <Icon name="sliders" className="w-3 h-3 text-emerald-400" /> Scan RVC Pitch
+                            </button>
+                            <button onClick={() => { setLogs([]); addLog("🧹 Cache cleared", "system"); }} className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] border border-slate-700">
+                                <Icon name="trash-2" className="w-3 h-3 text-rose-400" /> Clear Cache
+                            </button>
+                        </div>
+                        <span className="text-[11px] text-emerald-400 font-mono bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded shrink-0">● FREE TIER (Unlimited)</span>
+                    </div>
+
+                    {/* Workspace */}
+                    <div className="flex-1 flex overflow-hidden p-2 gap-2">
+
+                        {/* LEFT: Segments */}
+                        <div className="w-[380px] xl:w-[420px] flex flex-col bg-[#111322] border border-slate-800/80 rounded-lg overflow-hidden shrink-0 shadow-lg">
+                            <div className="bg-[#17192c] px-3 py-2 border-b border-slate-800 flex items-center justify-between">
+                                <span className="font-semibold text-xs text-slate-200 flex items-center gap-2">
+                                    <Icon name="list-video" className="w-4 h-4 text-cyan-400" /> Khmer Subtitles & Speakers
+                                </span>
+                                <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-cyan-400 font-mono">{segments.length} Segments</span>
+                            </div>
+                            <div className="p-2 border-b border-slate-800/80 bg-[#141627] flex gap-2">
+                                <div className="relative flex-1">
+                                    <span className="absolute left-2.5 top-2"><Icon name="search" className="w-3.5 h-3.5 text-slate-500" /></span>
+                                    <input type="text" placeholder="ស្វែងរកអត្ថបទខ្មែរ..." value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="w-full bg-[#0b0c16] border border-slate-800 rounded pl-8 pr-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-cyan-500/50" />
+                                </div>
+                            </div>
+                            <div className="flex-1 overflow-y-auto">
+                                <table className="w-full text-left border-collapse text-xs">
+                                    <thead className="bg-[#0b0c16] sticky top-0 z-10 text-slate-400 font-mono text-[10px] border-b border-slate-800">
+                                        <tr>
+                                            <th className="p-2 w-8 text-center">#</th>
+                                            <th className="p-2 w-24">Timing</th>
+                                            <th className="p-2">Khmer Dub Text</th>
+                                            <th className="p-2 w-24">Voice</th>
+                                            <th className="p-2 w-10 text-center">Play</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-800/50 font-sans">
+                                        {filteredSegments.map((seg) => {
+                                            const isActive = seg.id === activeSegmentId;
+                                            return (
+                                                <tr key={seg.id}
+                                                    onClick={() => { setActiveSegmentId(seg.id); seekTo(timeToSec(seg.start)); }}
+                                                    className={`transition cursor-pointer ${isActive ? 'bg-indigo-950/60 border-l-2 border-cyan-400 text-white' : 'hover:bg-slate-800/40 text-slate-300'}`}>
+                                                    <td className="p-2 text-center font-mono text-slate-500 text-[10px]">{seg.id}</td>
+                                                    <td className="p-1 font-mono text-[10px]" onClick={e => e.stopPropagation()}>
+                                                        <input value={seg.start} onChange={e => handleTimeChange(seg.id, 'start', e.target.value)}
+                                                            className="w-full bg-transparent text-cyan-300 border border-transparent hover:border-slate-800 focus:border-cyan-500/50 rounded px-1 focus:outline-none" />
+                                                        <input value={seg.end} onChange={e => handleTimeChange(seg.id, 'end', e.target.value)}
+                                                            className="w-full bg-transparent text-slate-500 border border-transparent hover:border-slate-800 focus:border-cyan-500/50 rounded px-1 focus:outline-none" />
+                                                    </td>
+                                                    <td className="p-2" onClick={e => e.stopPropagation()}>
+                                                        <textarea rows={2} value={seg.text}
+                                                            onChange={(e) => handleTextChange(seg.id, e.target.value)}
+                                                            className="w-full bg-transparent border border-transparent hover:border-slate-800 focus:border-cyan-500/50 focus:bg-[#0b0c16] rounded p-1 text-slate-100 text-xs resize-none focus:outline-none leading-snug" />
+                                                    </td>
+                                                    <td className="p-2" onClick={e => e.stopPropagation()}>
+                                                        <select value={seg.gender} onChange={(e) => handleGenderChange(seg.id, e.target.value)}
+                                                            className="bg-[#181a2e] border border-slate-700/80 text-amber-300 text-[10px] rounded px-1.5 py-1 focus:outline-none w-full">
+                                                            <option value="Boy">👦 Boy (ប្រុស)</option>
+                                                            <option value="Female">👩 Female (ស្រី)</option>
+                                                            <option value="Girl">👧 Girl (ក្មេងស្រី)</option>
+                                                            <option value="Male">👨 Male (បុរស)</option>
+                                                        </select>
+                                                    </td>
+                                                    <td className="p-2 text-center">
+                                                        <button onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setActiveSegmentId(seg.id);
+                                                            seekTo(timeToSec(seg.start));
+                                                            if (videoURL && videoRef.current) videoRef.current.play(); else setIsPlaying(true);
+                                                            addLog(`▶ Preview Segment #${seg.id}`, "info");
+                                                        }}
+                                                            className="p-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-full shadow transition inline-flex">
+                                                            <Icon name="play" className="w-3 h-3" />
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {filteredSegments.length === 0 && (
+                                            <tr><td colSpan="5" className="p-4 text-center text-slate-500 text-xs">គ្មានលទ្ធផល</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div className="p-2 bg-[#0e101c] border-t border-slate-800 flex items-center justify-between text-xs gap-2">
+                                <div className="flex gap-1.5">
+                                    <button onClick={addSegment} className="px-2.5 py-1 bg-emerald-800/60 hover:bg-emerald-700 border border-emerald-700/50 text-emerald-300 rounded text-[11px] flex items-center gap-1">
+                                        <Icon name="plus" className="w-3 h-3" /> បន្ថែម
+                                    </button>
+                                    <button onClick={deleteSegment} className="px-2.5 py-1 bg-rose-900/50 hover:bg-rose-800 border border-rose-800/50 text-rose-300 rounded text-[11px] flex items-center gap-1">
+                                        <Icon name="trash-2" className="w-3 h-3" /> លុប
+                                    </button>
+                                </div>
+                                <button onClick={() => setWatermarkLogo(!watermarkLogo)}
+                                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 rounded text-[11px] font-medium flex items-center gap-1.5 transition">
+                                    <Icon name="image" className="w-3.5 h-3.5" /> {watermarkLogo ? '✓ Logo' : 'Add Logo'}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* CENTER: Video + Timeline */}
+                        <div className="flex-1 flex flex-col gap-2 min-w-0">
+                            <div className="flex-1 bg-[#111322] border border-cyan-900/30 rounded-lg overflow-hidden flex flex-col shadow-2xl relative">
+                                <div className="bg-[#16182a] px-3 py-1.5 border-b border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-200">
+                                    <span className="flex items-center gap-2"><Icon name="film" className="w-4 h-4 text-cyan-400" /> Video Preview — {videoName}</span>
+                                    <div className="flex items-center space-x-2 text-[10px] font-mono">
+                                        <span className="bg-red-950/80 text-rose-400 border border-rose-800/40 px-2 py-0.5 rounded">{videoURL ? 'LOADED' : 'NO VIDEO'}</span>
+                                        <span className="bg-slate-800 text-slate-300 px-2 py-0.5 rounded">1080p</span>
+                                    </div>
+                                </div>
+
+                                <div className="flex-1 bg-black relative flex items-center justify-center overflow-hidden group">
+                                    {videoURL ? (
+                                        <video ref={videoRef} src={videoURL} className="w-full h-full object-contain"
+                                            onTimeUpdate={() => setCurrentTime(videoRef.current.currentTime)}
+                                            onLoadedMetadata={() => setDuration(videoRef.current.duration)}
+                                            onPlay={() => setIsPlaying(true)}
+                                            onPause={() => setIsPlaying(false)}
+                                            onEnded={() => setIsPlaying(false)}
+                                            onClick={togglePlay} />
+                                    ) : (
+                                        <div onClick={() => videoInputRef.current.click()} className="w-full h-full flex flex-col items-center justify-center text-slate-500 cursor-pointer hover:text-slate-300 transition">
+                                            <Icon name="upload-cloud" className="w-12 h-12 mb-3" />
+                                            <span className="text-sm">ចុចទីនេះដើម្បីផ្ទុកវីដេអូ (Load Video)</span>
+                                        </div>
+                                    )}
+
+                                    {watermarkLogo && (
+                                        <div className="absolute top-4 left-4 bg-cyan-600/90 text-white font-extrabold text-[11px] px-2.5 py-1 rounded shadow-lg tracking-wider border border-cyan-300/30 flex items-center gap-1 pointer-events-none">
+                                            <Icon name="zap" className="w-3 h-3" /> SININ PRO
+                                        </div>
+                                    )}
+
+                                    {(currentSub || activeSeg) && (
+                                        <div className="absolute bottom-8 px-6 py-2 bg-black/85 backdrop-blur-md rounded-lg text-amber-300 text-center text-sm md:text-base font-semibold max-w-[85%] border border-amber-500/40 shadow-2xl leading-relaxed pointer-events-none">
+                                            {(currentSub || activeSeg).text}
+                                        </div>
+                                    )}
+
+                                    {!isPlaying && videoURL && (
+                                        <button onClick={togglePlay}
+                                            className="absolute w-14 h-14 bg-cyan-600/90 hover:bg-cyan-500 text-white rounded-full flex items-center justify-center shadow-2xl hover:scale-105 transition border border-cyan-300/40 glow-cyan">
+                                            <Icon name="play" className="w-7 h-7 ml-1" />
+                                        </button>
+                                    )}
+                                </div>
+
+                                <div className="p-3 bg-[#111320] border-t border-slate-800/80 flex flex-col gap-2">
+                                    <div className="flex items-center justify-between text-xs text-slate-400 font-mono">
+                                        <span>{formatClock(currentTime)}</span>
+                                        <input type="range" min="0" max={duration || 1} step="0.1" value={currentTime}
+                                            onChange={(e) => seekTo(parseFloat(e.target.value))}
+                                            className="flex-1 mx-4 accent-cyan-400 h-1.5 bg-slate-800 rounded cursor-pointer" />
+                                        <span>{formatClock(duration)}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between pt-1">
+                                        <div className="flex items-center space-x-2">
+                                            <button onClick={() => jumpSegment(-1)} title="Segment មុន" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded">
+                                                <Icon name="skip-back" className="w-4 h-4" />
+                                            </button>
+                                            <button onClick={togglePlay} className="p-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-full shadow-md">
+                                                <Icon name={isPlaying ? "pause" : "play"} className="w-4 h-4" />
+                                            </button>
+                                            <button onClick={() => jumpSegment(1)} title="Segment បន្ទាប់" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded">
+                                                <Icon name="skip-forward" className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                        <div className="flex items-center space-x-3 text-xs text-slate-400">
+                                            <span className="flex items-center gap-1 font-mono"><Icon name="volume-2" className="w-3.5 h-3.5 text-cyan-400" /> Vol {bgmVolume}%</span>
+                                            <input type="range" min="0" max="100" value={bgmVolume}
+                                                onChange={(e) => setBgmVolume(Number(e.target.value))}
+                                                className="w-20 accent-cyan-400 h-1 bg-slate-800 rounded cursor-pointer" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Timeline */}
+                            <div className="h-40 bg-[#111322] border border-slate-800/80 rounded-lg flex flex-col overflow-hidden p-2.5 shrink-0 shadow-lg">
+                                <div className="flex items-center justify-between text-xs mb-1.5 text-slate-400 font-mono">
+                                    <span className="flex items-center gap-1.5 text-slate-200 font-semibold">
+                                        <Icon name="sliders" className="w-3.5 h-3.5 text-cyan-400" /> Multi-track Timeline (ចុចដើម្បី Seek)
+                                    </span>
+                                    <span className="text-cyan-400">{formatClock(currentTime)} / {formatClock(duration)}</span>
+                                </div>
+                                <div className="h-5 bg-[#0a0b14] border-b border-slate-800/80 flex items-center text-[9px] text-slate-500 font-mono relative overflow-hidden">
+                                    {[...Array(12)].map((_, i) => (
+                                        <div key={i} className="flex-1 border-l border-slate-800/60 pl-1">{formatClock((duration / 12) * i)}</div>
+                                    ))}
+                                </div>
+                                <div ref={timelineRef} onClick={handleTimelineClick} className="flex-1 flex flex-col justify-around py-1 relative bg-[#090a12] rounded overflow-hidden cursor-pointer">
+                                    <div className="absolute top-0 bottom-0 w-0.5 bg-rose-500 z-20 pointer-events-none"
+                                        style={{ left: `${(currentTime / (duration || 1)) * 100}%` }}>
+                                        <div className="w-2.5 h-2.5 bg-rose-500 rotate-45 -ml-1 -mt-0.5 shadow-md"></div>
+                                    </div>
+                                    {/* Audio & Sub tracks — ទីតាំង block តាម segment ពិត */}
+                                    {[['purple', 'mic', 'Audio'], ['cyan', 'message-square', 'Sub']].map(([color, icon, label]) => (
+                                        <div key={label} className={`h-6 flex items-center relative px-2 bg-${color}-950/20 border-y border-${color}-900/20`}>
+                                            <span className={`absolute left-1 text-[9px] text-${color}-400 font-mono z-10 flex items-center gap-1 bg-[#090a12]/90 px-1 rounded`}>
+                                                <Icon name={icon} className="w-2.5 h-2.5" /> {label}
+                                            </span>
+                                            <div className="w-full h-4 relative">
+                                                {segments.map(s => (
+                                                    <div key={s.id}
+                                                        className={`absolute h-4 rounded border bg-${color}-600/80 border-${color}-400/50 ${s.id === activeSegmentId ? 'ring-1 ring-white' : ''}`}
+                                                        style={{
+                                                            left: `${(timeToSec(s.start) / (duration || 1)) * 100}%`,
+                                                            width: `${Math.max(0.5, ((timeToSec(s.end) - timeToSec(s.start)) / (duration || 1)) * 100)}%`
+                                                        }}></div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                    <div className="h-6 flex items-center relative px-2 bg-amber-950/20">
+                                        <span className="absolute left-1 text-[9px] text-amber-400 font-mono z-10 flex items-center gap-1 bg-[#090a12]/90 px-1 rounded">
+                                            <Icon name="video" className="w-2.5 h-2.5" /> Video
+                                        </span>
+                                        <div className="w-full h-4 ml-14 bg-gradient-to-r from-amber-600/80 via-orange-600/80 to-rose-600/80 rounded flex items-center px-2 text-[9px] font-bold text-white tracking-widest uppercase">
+                                            {videoName}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* RIGHT: RVC + Terminal */}
+                        <div className="w-[300px] xl:w-[340px] flex flex-col gap-2 shrink-0">
+                            <div className="bg-[#111322] border border-slate-800/80 rounded-lg p-3 flex flex-col gap-3 shadow-lg">
+                                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                                    <span className="font-semibold text-xs text-slate-200 flex items-center gap-1.5">
+                                        <Icon name="mic-2" className="w-4 h-4 text-purple-400" /> RVC Voice Settings
+                                    </span>
+                                    <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-800/50 px-2 py-0.5 rounded font-mono">Neural V2</span>
+                                </div>
+                                <div className="space-y-2.5 text-xs">
+                                    <div>
+                                        <label className="block text-slate-400 mb-1 text-[11px]">Khmer Voice Profile</label>
+                                        <select onChange={(e) => addLog(`Voice profile → ${e.target.value}`, "info")}
+                                            className="w-full bg-[#181a2e] border border-slate-700/80 rounded p-1.5 text-slate-200 text-xs focus:outline-none focus:border-purple-500">
+                                            <option>Khmer Natural Speech V2 (Multi-Speaker)</option>
+                                            <option>Khmer Drama Movie Deep Tone</option>
+                                            <option>Khmer Anime Soft Voice Pack</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between text-slate-400 text-[11px] mb-1">
+                                            <span>Pitch Shift (Key)</span>
+                                            <span className="text-cyan-400 font-mono">{pitchShift > 0 ? '+' : ''}{pitchShift} Semi-tones</span>
+                                        </div>
+                                        <input type="range" min="-12" max="12" value={pitchShift}
+                                            onChange={(e) => setPitchShift(Number(e.target.value))}
+                                            className="w-full accent-purple-500 h-1 bg-slate-800 rounded cursor-pointer" />
+                                    </div>
+                                    <div className="pt-1 flex items-center justify-between text-xs">
+                                        <span className="text-slate-400">Formant Shift</span>
+                                        <span className="text-emerald-400 font-mono">Auto Sync</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex-1 bg-[#0a0b12] border border-slate-800/80 rounded-lg flex flex-col overflow-hidden font-code text-[11px] shadow-lg">
+                                <div className="bg-[#121422] px-3 py-1.5 border-b border-slate-800 text-slate-400 flex items-center justify-between">
+                                    <span className="flex items-center gap-1.5 text-xs text-slate-300">
+                                        <Icon name="terminal" className="w-3.5 h-3.5 text-emerald-400" /> Terminal Output
+                                    </span>
+                                    <button onClick={() => setLogs([])} className="text-[10px] text-slate-500 hover:text-slate-300">Clear</button>
+                                </div>
+                                <div className="flex-1 p-2.5 overflow-y-auto space-y-1 text-slate-300">
+                                    <div className="text-slate-500 text-[10px] mb-1">Project Workspace: {videoName}</div>
+                                    {logs.map((log, index) => (
+                                        <div key={index} className="flex gap-1.5 items-start leading-relaxed">
+                                            <span className="text-slate-500 shrink-0 text-[10px]">[{log.time}]</span>
+                                            <span className={
+                                                log.type === 'success' ? 'text-emerald-400' :
+                                                    log.type === 'system' ? 'text-cyan-400' :
+                                                        log.type === 'warning' ? 'text-amber-400' : 'text-slate-300'
+                                            }>{log.text}</span>
+                                        </div>
+                                    ))}
+                                    <div ref={logsEndRef} />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* API Modal */}
+                    {showApiModal && (
+                        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowApiModal(false)}>
+                            <div className="bg-[#141628] border border-cyan-500/30 rounded-xl w-full max-w-md p-5 shadow-2xl space-y-4" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                                    <h3 className="font-semibold text-slate-100 flex items-center gap-2">
+                                        <Icon name="key" className="w-4 h-4 text-amber-400" /> AI API Configuration
+                                    </h3>
+                                    <button onClick={() => setShowApiModal(false)} className="text-slate-400 hover:text-white">
+                                        <Icon name="x" className="w-4 h-4" />
+                                    </button>
+                                </div>
+                                <div className="space-y-3 text-xs">
+                                    <div>
+                                        <label className="block text-slate-400 mb-1">Google Gemini API Key (Khmer Translation)</label>
+                                        <input type="password" value={apiKey} placeholder="បញ្ចូល API Key របស់អ្នក..."
+                                            onChange={(e) => setApiKey(e.target.value)}
+                                            className="w-full bg-[#0b0c16] border border-slate-700 rounded-md p-2 text-cyan-300 font-mono focus:outline-none focus:border-cyan-500" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-slate-400 mb-1">RVC Voice Synthesis Engine</label>
+                                        <select className="w-full bg-[#0b0c16] border border-slate-700 rounded-md p-2 text-slate-200">
+                                            <option>SININ Khmer Voice Model V2 (Default)</option>
+                                            <option>SININ Khmer Anime Voice Pack</option>
+                                            <option>SININ Cinema Narrative Voice</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="flex justify-end gap-2 pt-2">
+                                    <button onClick={() => setShowApiModal(false)} className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-md text-xs">Cancel</button>
+                                    <button onClick={() => {
+                                        localStorage.setItem('sinin_api_key', apiKey);
+                                        setShowApiModal(false);
+                                        addLog("✓ បានរក្សាទុក API settings", "success");
+                                    }} className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md text-xs font-semibold shadow">Save Configuration</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<SininDubberApp />);
+    </script>
+</body>
+
+</html>
+```
+
+**ចំណាំសំខាន់៖** ផ្នែក AI ពិតប្រាកដ (Transcribe/Translate/RVC/Demucs/Export video) នៅតែជា simulation ព្រោះ browser
+តែឯងមិនអាចដំណើរការ Whisper, Gemini API ឬ RVC ដោយគ្មាន backend server ទេ។ បើអ្នកចង់ភ្ជាប់ Gemini API ពិតសម្រាប់ការបកប្រែ
+(ប្រើ API key ដែលរក្សាទុករួច) ប្រាប់ខ្ញុំ — ខ្ញុំអាចបន្ថែម `fetch` call ទៅ Gemini endpoint
+ឱ្យបកប្រែអត្ថបទក្នុងតារាងដោយផ្ទាល់។
